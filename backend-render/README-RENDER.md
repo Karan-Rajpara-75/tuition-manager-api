@@ -11,3 +11,6 @@
 Default fresh-install login: `admin` / `admin123`; change it after first login.
 
 **Important:** Persistent disk is required for reliable storage. Without it, a Render restart/redeploy can reset stored data. This simple JSON store is intended for a single Render instance; do not scale it to multiple instances. Export a backup regularly.
+
+
+CORS note: set FRONTEND_ORIGIN to https://tution-classes-75.netlify.app (exact origin, no trailing slash). This build also supports HTTPS Netlify subdomains and reflects the exact allowed origin for credentialed requests. After changing server.mjs, redeploy the Render service. Check https://tuition-manager-api.onrender.com/api/health first.
