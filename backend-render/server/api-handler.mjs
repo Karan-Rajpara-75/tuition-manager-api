@@ -503,6 +503,75 @@ export default async function handler(req) {
     }
 
 
+    if (path === 'quizzes/results' && method === 'GET') {
+      const rows = await store.get('tuition-manager:quiz-results', { type: 'json', consistency: 'strong' }).catch(() => []) || [];
+      return json({ ok:true, results: session.role === 'admin' ? rows : rows.filter(r => r.userId === session.userId) });
+    }
+
+    // Shared server-side quizzes. Each attempt gets an independent question and option shuffle.
+    if (path === 'quizzes') {
+      const quizKey = 'tuition-manager:quizzes';
+      const resultKey = 'tuition-manager:quiz-results';
+      const state = await ensureInitialized();
+      const quizzes = await store.get(quizKey, { type: 'json', consistency: 'strong' }).catch(() => []) || [];
+      const results = await store.get(resultKey, { type: 'json', consistency: 'strong' }).catch(() => []) || [];
+      if (method === 'GET') {
+        const visible = quizzes.map(q => ({ id:q.id, title:q.title, totalMarks:q.totalMarks, questionCount:q.questions.length, createdAt:q.createdAt }));
+        return json({ ok:true, quizzes:visible, results: session.role === 'admin' ? results : results.filter(r => r.userId === session.userId) });
+      }
+      if (session.role !== 'admin') return json({ ok:false, error:'Admin access required.' }, 403);
+      if (method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        const title = String(body.title || '').trim().slice(0,100);
+        const totalMarks = Number(body.totalMarks);
+        const questions = Array.isArray(body.questions) ? body.questions : [];
+        if (!title || !Number.isFinite(totalMarks) || totalMarks < 1 || totalMarks > 500 || !questions.length || questions.length > 200) return json({ok:false,error:'Provide a title, total marks from 1 to 500, and 1–200 questions.'},400);
+        const clean = [];
+        for (const item of questions) {
+          const question = String(item.question || '').trim().slice(0,1000);
+          const options = Array.isArray(item.options) ? item.options.map(x => String(x ?? '').trim().slice(0,500)) : [];
+          const correct = Number(item.correct);
+          if (!question || options.length !== 4 || options.some(x => !x) || !Number.isInteger(correct) || correct < 0 || correct > 3) return json({ok:false,error:'Every question needs text, four options and one correct answer.'},400);
+          clean.push({ id:uid(), question, options:options.map((text,i)=>({id:uid(),text,correct:i===correct})) });
+        }
+        const lockToken = await acquireLock(); if (!lockToken) return json({ok:false,error:'Another save is in progress. Please retry.'},409);
+        try {
+          const current = await store.get(quizKey,{type:'json',consistency:'strong'}).catch(()=>[]) || [];
+          const quiz = {id:uid(),title,totalMarks,questions:clean,createdAt:Date.now(),createdBy:session.userId};
+          current.push(quiz); await store.setJSON(quizKey,current);
+          return json({ok:true,quiz:{id:quiz.id,title,totalMarks,questionCount:clean.length}});
+        } finally { await releaseLock(lockToken); }
+      }
+      if (method === 'DELETE') {
+        const body = await req.json().catch(() => ({})); const id = String(body.id || '');
+        const lockToken = await acquireLock(); if (!lockToken) return json({ok:false,error:'Another save is in progress. Please retry.'},409);
+        try { const current = await store.get(quizKey,{type:'json',consistency:'strong'}).catch(()=>[]) || []; const next=current.filter(q=>q.id!==id); if(next.length===current.length)return json({ok:false,error:'Quiz not found.'},404); await store.setJSON(quizKey,next); return json({ok:true}); }
+        finally { await releaseLock(lockToken); }
+      }
+      return json({ok:false,error:'Method not allowed.'},405);
+    }
+    if (path === 'quizzes/attempt' && method === 'POST') {
+      const body = await req.json().catch(() => ({})); const quizId=String(body.quizId||'');
+      const quizzes=await store.get('tuition-manager:quizzes',{type:'json',consistency:'strong'}).catch(()=>[])||[];
+      const quiz=quizzes.find(q=>q.id===quizId); if(!quiz)return json({ok:false,error:'Quiz not found.'},404);
+      const shuffle=a=>{const x=[...a];for(let i=x.length-1;i>0;i--){const j=crypto.randomInt(i+1);[x[i],x[j]]=[x[j],x[i]];}return x;};
+      const attemptId=uid(); const questions=shuffle(quiz.questions).map(q=>({id:q.id,question:q.question,marks:Math.round((quiz.totalMarks/quiz.questions.length)*100)/100,options:shuffle(q.options).map(o=>({id:o.id,text:o.text}))}));
+      await store.setJSON('tuition-manager:quiz-attempt:'+attemptId,{attemptId,quizId:quiz.id,title:quiz.title,totalMarks:quiz.totalMarks,userId:session.userId,studentId:session.studentId||null,questions:questions.map(q=>({id:q.id,options:q.options,correctOptionId:quiz.questions.find(orig=>orig.id===q.id).options.find(o=>o.correct).id})),createdAt:Date.now()});
+      return json({ok:true,attemptId,title:quiz.title,totalMarks:quiz.totalMarks,questions});
+    }
+    if (path === 'quizzes/submit' && method === 'POST') {
+      const body=await req.json().catch(()=>({})); const attemptId=String(body.attemptId||'');
+      const attempt=await store.get('tuition-manager:quiz-attempt:'+attemptId,{type:'json',consistency:'strong'}).catch(()=>null);
+      if(!attempt||attempt.userId!==session.userId)return json({ok:false,error:'Attempt not found or already submitted.'},404);
+      if(Date.now()-attempt.createdAt>4*60*60*1000)return json({ok:false,error:'This test attempt has expired. Start again.'},410);
+      const answers=body.answers&&typeof body.answers==='object'?body.answers:{}; let correct=0;
+      for(const q of attempt.questions) if(String(answers[q.id]||'')===q.correctOptionId)correct++;
+      const total=attempt.questions.length; const score=Math.round((correct/Math.max(total,1))*attempt.totalMarks*100)/100; const percent=Math.round(score/attempt.totalMarks*10000)/100;
+      const result={id:uid(),quizId:attempt.quizId,title:attempt.title,userId:session.userId,studentId:session.studentId||null,score,totalMarks:attempt.totalMarks,total,correct,percent,date:new Date().toISOString()};
+      const lockToken=await acquireLock();if(!lockToken)return json({ok:false,error:'Another save is in progress. Please retry.'},409);
+      try{const rows=await store.get('tuition-manager:quiz-results',{type:'json',consistency:'strong'}).catch(()=>[])||[];rows.push(result);await store.setJSON('tuition-manager:quiz-results',rows);await store.delete('tuition-manager:quiz-attempt:'+attemptId);return json({ok:true,...result});}finally{await releaseLock(lockToken);}
+    }
+
     if (path === 'points') {
       if (session.role !== 'admin') return json({ ok: false, error: 'Admin access required.' }, 403);
       const action = method === 'POST' ? 'add' : method === 'PUT' ? 'edit' : method === 'DELETE' ? 'delete' : '';
