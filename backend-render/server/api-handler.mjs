@@ -233,7 +233,8 @@ function publicData(data, session) {
     attendance: safe.attendance.filter(a => a.studentId === session.studentId),
     subjectUpdates: safe.subjectUpdates,
     doubts: safe.doubts.filter(d => d.studentId === session.studentId),
-    schoolPapers: safe.schoolPapers.filter(p => p.studentId === session.studentId)
+    schoolPapers: safe.schoolPapers.filter(p => p.studentId === session.studentId),
+    sharedWallpaper: safe.sharedWallpaper || ''
   };
 }
 

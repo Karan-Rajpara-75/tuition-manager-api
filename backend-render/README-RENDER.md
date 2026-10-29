@@ -14,3 +14,10 @@ Default fresh-install login: `admin` / `admin123`; change it after first login.
 
 
 CORS note: set FRONTEND_ORIGIN to https://tution-classes-75.netlify.app (exact origin, no trailing slash). This build also supports HTTPS Netlify subdomains and reflects the exact allowed origin for credentialed requests. After changing server.mjs, redeploy the Render service. Check https://tuition-manager-api.onrender.com/api/health first.
+
+
+## Persistent storage (important)
+
+When `DATABASE_URL` is set, the API stores application state, sessions, quizzes and quiz results in PostgreSQL (`tuition_manager_store` table). This is the recommended configuration because Render web-service filesystems such as `/tmp` are ephemeral and may be cleared when an instance restarts or sleeps. Keep `DATABASE_URL` set to your Render PostgreSQL **Internal Database URL** when the database and web service are in the same Render region. The app creates its table automatically on startup. `DATA_DIR` is only a fallback for local/file storage when no database URL is configured.
+
+If a legacy JSON file still exists, the API imports its value into PostgreSQL on the first read of that key.
